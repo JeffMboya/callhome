@@ -253,9 +253,13 @@ function getCountryCoordinates(country, callback) {
     })
     .then(function (data) {
       if (data.length > 0) {
-        var lat = parseFloat(data[0].lat);
-        var lng = parseFloat(data[0].lon);
-        callback(lat, lng);
+        try {
+          const context = `country lookup for "${country}"`;
+          const coords = assertValidLatLng(data[0].lat, data[0].lon, context);
+          callback(coords.lat, coords.lng);
+        } catch (validationError) {
+          console.error(validationError.message);
+        }
       } else {
         console.log("Coordinates not found for country: " + country);
       }
@@ -265,77 +269,179 @@ function getCountryCoordinates(country, callback) {
     });
 }
 
+function assertValidLatLng(latRaw, lngRaw, context = "record") {
+  if (latRaw === undefined || latRaw === null) {
+    throw new Error(`Invalid coordinate in ${context}: latitude is ${latRaw}. Source: ${JSON.stringify({lat: latRaw, lng: lngRaw})}`);
+  }
+  if (lngRaw === undefined || lngRaw === null) {
+    throw new Error(`Invalid coordinate in ${context}: longitude is ${lngRaw}. Source: ${JSON.stringify({lat: latRaw, lng: lngRaw})}`);
+  }
+
+  const latNum = Number(latRaw);
+  const lngNum = Number(lngRaw);
+
+  if (isNaN(latNum)) {
+    throw new Error(`Invalid coordinate in ${context}: latitude "${latRaw}" cannot be parsed as number. Source: ${JSON.stringify({lat: latRaw, lng: lngRaw})}`);
+  }
+  if (isNaN(lngNum)) {
+    throw new Error(`Invalid coordinate in ${context}: longitude "${lngRaw}" cannot be parsed as number. Source: ${JSON.stringify({lat: latRaw, lng: lngRaw})}`);
+  }
+
+  if (!isFinite(latNum)) {
+    throw new Error(`Invalid coordinate in ${context}: latitude ${latNum} is not finite. Source: ${JSON.stringify({lat: latRaw, lng: lngRaw})}`);
+  }
+  if (!isFinite(lngNum)) {
+    throw new Error(`Invalid coordinate in ${context}: longitude ${lngNum} is not finite. Source: ${JSON.stringify({lat: latRaw, lng: lngRaw})}`);
+  }
+
+  if (latNum < -90 || latNum > 90) {
+    throw new Error(`Invalid coordinate in ${context}: latitude ${latNum} is outside valid range [-90, 90]. Source: ${JSON.stringify({lat: latRaw, lng: lngRaw})}`);
+  }
+  if (lngNum < -180 || lngNum > 180) {
+    throw new Error(`Invalid coordinate in ${context}: longitude ${lngNum} is outside valid range [-180, 180]. Source: ${JSON.stringify({lat: latRaw, lng: lngRaw})}`);
+  }
+
+  if (latNum === 0 && lngNum === 0) {
+    throw new Error(`Invalid coordinate in ${context}: coordinates (0, 0) are likely invalid. Source: ${JSON.stringify({lat: latRaw, lng: lngRaw})}`);
+  }
+
+  return { lat: latNum, lng: lngNum };
+}
+
 async function logJSONData() {
   // Get map data from global variable injected by Go template
+  const spinner = document.getElementById("spinner-overlay");
+  
   if (!window.MAP_DATA) {
     console.error("MAP_DATA not found. Check if the Go template is rendering correctly.");
+    if (spinner) {
+      spinner.style.display = "none";
+    }
     return;
   }
 
+  const safetyTimeout = setTimeout(() => {
+    console.warn("Safety timeout: forcing spinner to hide");
+    if (spinner) {
+      spinner.style.display = "none";
+    }
+  }, 5000);
+  
   try {
     const obj = JSON.parse(window.MAP_DATA);
     const telemetryData = obj.Telemetry || [];
+    
+    console.log("Processing", telemetryData.length, "telemetry entries");
 
     // Show spinner while loading markers
-    const spinner = document.getElementById("spinner-overlay");
     if (spinner && telemetryData.length > 0) {
       spinner.style.display = "flex";
     }
 
     // Process markers in batches to avoid blocking the UI
-    const batchSize = 100;
+    const batchSize = 50;
+    let processedCount = 0;
+    
     for (let i = 0; i < telemetryData.length; i += batchSize) {
       const batch = telemetryData.slice(i, i + batchSize);
 
-      // Process batch asynchronously
+      // Process batch asynchronously with proper yielding
       await new Promise(resolve => {
-        requestAnimationFrame(() => {
-          batch.forEach((tel) => {
-            const last_seen = new Date(tel.last_seen);
-            const marker = L.circle([tel.latitude, tel.longitude], {
-              radius: 1000,
-            }).bindPopup(
-              `<h3>Deployment details</h3>
-                        <p style="font-size: 12px;">version:\t${
-                          tel.magistrala_version
-                        }</p>
-                        <p style="font-size: 12px;">last seen:\t${last_seen}</p>
-                        <p style="font-size: 12px;">country:\t${
-                          tel.country
-                        }</p>
-                        <p style="font-size: 12px;">city:\t${tel.city}</p>
-                        <p style="font-size: 12px;">Services:\t${tel.services.join(
-                          ", "
-                        )}</p>`
-            );
+        setTimeout(() => {
+          try {
+            requestAnimationFrame(() => {
+              try {
+                batch.forEach((tel) => {
+                  if (!tel || typeof tel !== 'object') {
+                    return;
+                  }
 
-            allMarkers.push({
-              marker: marker,
-              data: tel
+                  if (!('latitude' in tel) || !('longitude' in tel)) {
+                    const context = `telemetry entry (ip: ${tel.ip_address || 'unknown'}, country: ${tel.country || 'unknown'})`;
+                    console.error(`Missing coordinate properties in ${context}. Available keys: ${Object.keys(tel).join(', ')}`);
+                    return;
+                  }
+
+                  let coords;
+                  try {
+                    const context = `telemetry entry (ip: ${tel.ip_address || 'unknown'}, country: ${tel.country || 'unknown'})`;
+                    coords = assertValidLatLng(tel.latitude, tel.longitude, context);
+                  } catch (validationError) {
+                    console.error(validationError.message);
+                    return;
+                  }
+
+                  const last_seen = new Date(tel.last_seen);
+                  const marker = L.circle([coords.lat, coords.lng], {
+                    radius: 1000,
+                  }).bindPopup(
+                    `<h3>Deployment details</h3>
+                              <p style="font-size: 12px;">version:\t${
+                                tel.magistrala_version || "unknown"
+                              }</p>
+                              <p style="font-size: 12px;">last seen:\t${last_seen}</p>
+                              <p style="font-size: 12px;">country:\t${
+                                tel.country || "-"
+                              }</p>
+                              <p style="font-size: 12px;">city:\t${tel.city || "-"}</p>
+                              <p style="font-size: 12px;">Services:\t${(tel.services || []).join(
+                                ", "
+                              )}</p>`
+                  );
+
+                  allMarkers.push({
+                    marker: marker,
+                    data: tel
+                  });
+                  processedCount++;
+                });
+              } catch (err) {
+                console.error("Error processing batch:", err);
+              }
+              resolve();
             });
-          });
-          resolve();
-        });
+          } catch (err) {
+            console.error("Error in requestAnimationFrame:", err);
+            resolve();
+          }
+        }, 10);
       });
     }
 
-    // Add all markers to the map and apply filters
-    map.addLayer(markerClusterGroup);
-    filterMarkers({});
+    console.log("Processed", processedCount, "markers, adding to map...");
 
-    // Fit map bounds to show all markers
-    if (allMarkers.length > 0) {
-      const bounds = L.latLngBounds(allMarkers.map(item => [item.data.latitude, item.data.longitude]));
-      map.fitBounds(bounds, { padding: [50, 50] });
+    try {
+      allMarkers.forEach(function(item) {
+        markerClusterGroup.addLayer(item.marker);
+      });
+      
+      map.addLayer(markerClusterGroup);
+      console.log("Markers added to map, hiding spinner...");
+      
+      clearTimeout(safetyTimeout);
+      if (spinner) {
+        spinner.style.display = "none";
+        console.log("Spinner hidden");
+      }
+      
+      setTimeout(() => {
+        try {
+          filterMarkers({});
+        } catch (err) {
+          console.error("Error filtering markers:", err);
+        }
+      }, 100);
+    } catch (err) {
+      console.error("Error adding markers to map:", err);
+      clearTimeout(safetyTimeout);
+      if (spinner) {
+        spinner.style.display = "none";
+      }
     }
 
-    // Hide spinner
-    if (spinner) {
-      spinner.style.display = "none";
-    }
   } catch (error) {
     console.error("Error loading map data:", error);
-    const spinner = document.getElementById("spinner-overlay");
+    clearTimeout(safetyTimeout);
     if (spinner) {
       spinner.style.display = "none";
     }

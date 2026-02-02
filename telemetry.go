@@ -13,8 +13,8 @@ import (
 type Telemetry struct {
 	Services    pq.StringArray `json:"services,omitempty" db:"services"`
 	Service     string         `json:"service,omitempty" db:"service"`
-	Longitude   float64        `json:"longitude,omitempty" db:"longitude"`
-	Latitude    float64        `json:"latitude,omitempty" db:"latitude"`
+	Longitude   float64        `json:"longitude" db:"longitude"`
+	Latitude    float64        `json:"latitude" db:"latitude"`
 	IpAddress   string         `json:"-" db:"ip_address"`
 	MacAddress  string         `json:"-" db:"mac_address"`
 	Version     string         `json:"magistrala_version,omitempty" db:"mg_version"`
